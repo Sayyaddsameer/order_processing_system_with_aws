@@ -1,0 +1,118 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: >
+  Order Processing System (Event-Driven Architecture)
+  SAM Template demonstrating Lambda, API Gateway, SQS, SNS, and RDS.
+
+Globals:
+  Function:
+    Timeout: 30
+    MemorySize: 256
+    Runtime: python3.11
+    Environment:
+      Variables:
+        DB_HOST: !Ref DatabaseHost
+        DB_PORT: '5432'
+        DB_NAME: orders_db
+        DB_USER: orders_user
+        DB_PASSWORD: '{{resolve:ssm:orders_db_password:1}}'
+        LOG_LEVEL: INFO
+
+Parameters:
+  DatabaseHost:
+    Type: String
+    Description: Hostname of the RDS PostgreSQL instance
+
+Resources:
+  # --------------------------------------------------------------------------
+  # SQS Queues
+  # --------------------------------------------------------------------------
+  OrderProcessingDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      MessageRetentionPeriod: 1209600 # 14 days
+
+  OrderProcessingQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      VisibilityTimeout: 60
+      MessageRetentionPeriod: 86400 # 1 day
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt OrderProcessingDLQ.Arn
+        maxReceiveCount: 3
+
+  # --------------------------------------------------------------------------
+  # SNS Topic
+  # --------------------------------------------------------------------------
+  OrderStatusNotifications:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: OrderStatusNotifications
+
+  # --------------------------------------------------------------------------
+  # Lambda Functions
+  # --------------------------------------------------------------------------
+  OrderCreatorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/order_creator_lambda/
+      Handler: app.handler
+      Environment:
+        Variables:
+          SQS_QUEUE_URL: !Ref OrderProcessingQueue
+      Policies:
+        - SQSSendMessagePolicy:
+            QueueName: !GetAtt OrderProcessingQueue.QueueName
+      Events:
+        CreateOrderApi:
+          Type: Api
+          Properties:
+            Path: /orders
+            Method: post
+        GetOrderApi:
+          Type: Api
+          Properties:
+            Path: /orders/{order_id}
+            Method: get
+
+  OrderProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/order_processor_lambda/
+      Handler: app.handler
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref OrderStatusNotifications
+      Policies:
+        - SQSPollerPolicy:
+            QueueName: !GetAtt OrderProcessingQueue.QueueName
+        - SNSPublishMessagePolicy:
+            TopicName: !GetAtt OrderStatusNotifications.TopicName
+      Events:
+        ProcessOrderEvent:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrderProcessingQueue.Arn
+            BatchSize: 5
+
+  NotificationServiceFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: src/notification_service_lambda/
+      Handler: app.handler
+      Events:
+        OrderStatusEvent:
+          Type: SNS
+          Properties:
+            Topic: !Ref OrderStatusNotifications
+
+Outputs:
+  OrdersApiUrl:
+    Description: "API Gateway endpoint URL for Prod stage"
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/orders"
+  OrderProcessingQueueUrl:
+    Description: "SQS Queue URL"
+    Value: !Ref OrderProcessingQueue
+  OrderStatusTopicArn:
+    Description: "SNS Topic ARN"
+    Value: !Ref OrderStatusNotifications

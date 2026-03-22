@@ -1,0 +1,113 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: orders-postgres
+    environment:
+      POSTGRES_DB: orders_db
+      POSTGRES_USER: orders_user
+      POSTGRES_PASSWORD: orders_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U orders_user -d orders_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  localstack:
+    image: localstack/localstack:latest
+    container_name: orders-localstack
+    ports:
+      - "4566:4566"
+    environment:
+      - SERVICES=s3,sqs,sns,lambda,apigateway,iam
+      - DEBUG=1
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - AWS_DEFAULT_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      # Provide lambda access to the internal docker network so it can reach postgres
+      - LAMBDA_DOCKER_NETWORK=order_processing_system_default
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./scripts/init_aws.sh:/etc/localstack/init/ready.d/init_aws.sh
+      - ./src:/opt/code/src
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - "CMD"
+        - "awslocal"
+        - "sqs"
+        - "list-queues"
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  # Custom Lambda service builds as requested in Step 1.1
+  # They can be used to run the lambdas standalone with AWS Lambda RIE
+  order-creator-service:
+    build:
+      context: ./src/order_creator_lambda
+    container_name: order-creator-service
+    ports:
+      - "9001:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=orders_db
+      - DB_USER=orders_user
+      - DB_PASSWORD=orders_password
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SQS_QUEUE_URL=http://localstack:4566/000000000000/OrderProcessingQueue
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  order-processor-service:
+    build:
+      context: ./src/order_processor_lambda
+    container_name: order-processor-service
+    ports:
+      - "9002:8080"
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_NAME=orders_db
+      - DB_USER=orders_user
+      - DB_PASSWORD=orders_password
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+      - SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:OrderStatusNotifications
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+  notification-service:
+    build:
+      context: ./src/notification_service_lambda
+    container_name: notification-service
+    ports:
+      - "9003:8080"
+    environment:
+      - AWS_ENDPOINT_URL=http://localstack:4566
+      - AWS_REGION=us-east-1
+      - AWS_ACCESS_KEY_ID=test
+      - AWS_SECRET_ACCESS_KEY=test
+    depends_on:
+      localstack:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
