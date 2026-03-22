@@ -4,6 +4,9 @@ A resilient, event-driven backend system for an e-commerce platform that process
 
 The architecture decouples order submission from downstream processing, ensuring low latency for users and high availability even under heavy loads. The system simulates a production-grade AWS environment locally using LocalStack and Docker Compose.
 
+**Watch the demo:**  
+[![Watch the Demo](https://img.shields.io/badge/Watch-Demo%20Video-red?style=for-the-badge&logo=google-drive)](https://drive.google.com/file/d/1Gf41-IXdyxP3dFF7yFBjgm9iV-mVJU-Z/view?usp=sharing)
+
 ---
 
 ## Architecture Overview
