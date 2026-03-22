@@ -1,38 +1,66 @@
 version: "3.8"
 
+# All sensitive values are read from the .env file (copy from .env.example).
+# Run:  cp .env.example .env  before starting.
+
+networks:
+  order-net:
+    name: order-net
+
 services:
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL — RDS equivalent for local development
+  # ---------------------------------------------------------------------------
   postgres:
     image: postgres:15-alpine
     container_name: orders-postgres
     environment:
-      POSTGRES_DB: orders_db
-      POSTGRES_USER: orders_user
-      POSTGRES_PASSWORD: orders_password
+      POSTGRES_DB: ${DB_NAME:-orders_db}
+      POSTGRES_USER: ${DB_USER:-orders_user}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-orders_password}
     ports:
-      - "5432:5432"
+      - "${DB_PORT:-5432}:5432"
     volumes:
       - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql
       - postgres_data:/var/lib/postgresql/data
+    networks:
+      - order-net
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U orders_user -d orders_db"]
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-orders_user} -d ${DB_NAME:-orders_db}"]
       interval: 5s
       timeout: 5s
       retries: 5
 
+  # ---------------------------------------------------------------------------
+  # LocalStack — emulates AWS services locally
+  # ---------------------------------------------------------------------------
   localstack:
     image: localstack/localstack:latest
     container_name: orders-localstack
     ports:
-      - "4566:4566"
+      - "${LOCALSTACK_PORT:-4566}:4566"
     environment:
-      - SERVICES=s3,sqs,sns,lambda,apigateway,iam
-      - DEBUG=1
+      - SERVICES=sqs,sns,lambda,apigateway,iam,logs
+      - DEBUG=${LOCALSTACK_DEBUG:-0}
       - DOCKER_HOST=unix:///var/run/docker.sock
-      - AWS_DEFAULT_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      # Provide lambda access to the internal docker network so it can reach postgres
-      - LAMBDA_DOCKER_NETWORK=order_processing_system_default
+      - AWS_DEFAULT_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      # Explicit named network so Lambda containers can always reach postgres
+      - LAMBDA_DOCKER_NETWORK=order-net
+      # Pass through DB + App config so init_aws.sh can use them
+      - DB_HOST=postgres
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-orders_db}
+      - DB_USER=${DB_USER:-orders_user}
+      - DB_PASSWORD=${DB_PASSWORD:-orders_password}
+      - SQS_QUEUE_NAME=${SQS_QUEUE_NAME:-OrderProcessingQueue}
+      - SQS_DLQ_NAME=${SQS_DLQ_NAME:-OrderProcessingDLQ}
+      - SNS_TOPIC_NAME=${SNS_TOPIC_NAME:-OrderStatusNotifications}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - PROCESSING_SUCCESS_RATE=${PROCESSING_SUCCESS_RATE:-0.85}
+      - API_STAGE_NAME=${API_STAGE_NAME:-local}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./scripts/init_aws.sh:/etc/localstack/init/ready.d/init_aws.sh
@@ -40,18 +68,18 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - order-net
     healthcheck:
-      test:
-        - "CMD"
-        - "awslocal"
-        - "sqs"
-        - "list-queues"
+      test: ["CMD", "awslocal", "sqs", "list-queues"]
       interval: 10s
       timeout: 5s
       retries: 10
 
-  # Custom Lambda service builds as requested in Step 1.1
-  # They can be used to run the lambdas standalone with AWS Lambda RIE
+  # ---------------------------------------------------------------------------
+  # Lambda Services (standalone runtime via AWS Lambda RIE)
+  # Used for direct invocation testing; LocalStack manages the real triggers.
+  # ---------------------------------------------------------------------------
   order-creator-service:
     build:
       context: ./src/order_creator_lambda
@@ -60,15 +88,18 @@ services:
       - "9001:8080"
     environment:
       - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_NAME=orders_db
-      - DB_USER=orders_user
-      - DB_PASSWORD=orders_password
-      - AWS_ENDPOINT_URL=http://localstack:4566
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - SQS_QUEUE_URL=http://localstack:4566/000000000000/OrderProcessingQueue
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-orders_db}
+      - DB_USER=${DB_USER:-orders_user}
+      - DB_PASSWORD=${DB_PASSWORD:-orders_password}
+      - AWS_ENDPOINT_URL=http://localstack:${LOCALSTACK_PORT:-4566}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - SQS_QUEUE_URL=http://localstack:${LOCALSTACK_PORT:-4566}/000000000000/${SQS_QUEUE_NAME:-OrderProcessingQueue}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - order-net
     depends_on:
       localstack:
         condition: service_healthy
@@ -81,15 +112,19 @@ services:
       - "9002:8080"
     environment:
       - DB_HOST=postgres
-      - DB_PORT=5432
-      - DB_NAME=orders_db
-      - DB_USER=orders_user
-      - DB_PASSWORD=orders_password
-      - AWS_ENDPOINT_URL=http://localstack:4566
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
-      - SNS_TOPIC_ARN=arn:aws:sns:us-east-1:000000000000:OrderStatusNotifications
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-orders_db}
+      - DB_USER=${DB_USER:-orders_user}
+      - DB_PASSWORD=${DB_PASSWORD:-orders_password}
+      - AWS_ENDPOINT_URL=http://localstack:${LOCALSTACK_PORT:-4566}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - SNS_TOPIC_ARN=arn:aws:sns:${AWS_REGION:-us-east-1}:000000000000:${SNS_TOPIC_NAME:-OrderStatusNotifications}
+      - PROCESSING_SUCCESS_RATE=${PROCESSING_SUCCESS_RATE:-0.85}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - order-net
     depends_on:
       localstack:
         condition: service_healthy
@@ -101,13 +136,63 @@ services:
     ports:
       - "9003:8080"
     environment:
-      - AWS_ENDPOINT_URL=http://localstack:4566
-      - AWS_REGION=us-east-1
-      - AWS_ACCESS_KEY_ID=test
-      - AWS_SECRET_ACCESS_KEY=test
+      - AWS_ENDPOINT_URL=http://localstack:${LOCALSTACK_PORT:-4566}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    networks:
+      - order-net
     depends_on:
       localstack:
         condition: service_healthy
+
+  # ---------------------------------------------------------------------------
+  # Integration Test Runner
+  # Run with: docker-compose --profile test run --rm test-runner
+  # ---------------------------------------------------------------------------
+  test-runner:
+    image: python:3.11-slim
+    container_name: orders-test-runner
+    working_dir: /app
+    volumes:
+      - .:/app
+    environment:
+      - DB_HOST=postgres
+      - DB_PORT=${DB_PORT:-5432}
+      - DB_NAME=${DB_NAME:-orders_db}
+      - DB_USER=${DB_USER:-orders_user}
+      - DB_PASSWORD=${DB_PASSWORD:-orders_password}
+      - AWS_ENDPOINT_URL=http://localstack:${LOCALSTACK_PORT:-4566}
+      - AWS_REGION=${AWS_REGION:-us-east-1}
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-test}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-test}
+      - API_STAGE_NAME=${API_STAGE_NAME:-local}
+    networks:
+      - order-net
+    depends_on:
+      localstack:
+        condition: service_healthy
+    command: >
+      sh -c "pip install -r tests/requirements.txt -q &&
+             API_ID=$$(python3 -c \"
+import boto3, os
+c = boto3.client('apigateway',
+    region_name=os.environ['AWS_REGION'],
+    endpoint_url=os.environ['AWS_ENDPOINT_URL'],
+    aws_access_key_id=os.environ['AWS_ACCESS_KEY_ID'],
+    aws_secret_access_key=os.environ['AWS_SECRET_ACCESS_KEY'])
+apis = c.get_rest_apis()['items']
+match = [a['id'] for a in apis if a['name']=='OrdersAPI']
+print(match[0] if match else '')
+\") &&
+             if [ -z \"\$$API_ID\" ]; then echo 'ERROR: OrdersAPI not found in LocalStack'; exit 1; fi &&
+             export API_GATEWAY_ID=\$$API_ID &&
+             export API_GATEWAY_URL=$${AWS_ENDPOINT_URL}/restapis/\$$API_ID/$${API_STAGE_NAME:-local}/_user_request_/orders &&
+             echo \"Running tests against \$$API_GATEWAY_URL\" &&
+             pytest tests/integration/ -v"
+    profiles:
+      - test
 
 volumes:
   postgres_data:

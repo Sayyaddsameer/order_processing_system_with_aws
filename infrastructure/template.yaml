@@ -12,16 +12,36 @@ Globals:
     Environment:
       Variables:
         DB_HOST: !Ref DatabaseHost
-        DB_PORT: '5432'
-        DB_NAME: orders_db
-        DB_USER: orders_user
-        DB_PASSWORD: '{{resolve:ssm:orders_db_password:1}}'
-        LOG_LEVEL: INFO
+        DB_PORT: !Ref DatabasePort
+        DB_NAME: !Ref DatabaseName
+        DB_USER: !Ref DatabaseUser
+        DB_PASSWORD: !Ref DatabasePassword
+        LOG_LEVEL: !Ref LogLevel
 
 Parameters:
   DatabaseHost:
     Type: String
     Description: Hostname of the RDS PostgreSQL instance
+  DatabasePort:
+    Type: String
+    Default: '5432'
+    Description: Port of the RDS PostgreSQL instance
+  DatabaseName:
+    Type: String
+    Default: orders_db
+    Description: Name of the PostgreSQL database
+  DatabaseUser:
+    Type: String
+    Default: orders_user
+    Description: PostgreSQL username
+  DatabasePassword:
+    Type: String
+    NoEcho: true
+    Description: PostgreSQL password
+  LogLevel:
+    Type: String
+    Default: INFO
+    Description: Application logging level
 
 Resources:
   # --------------------------------------------------------------------------
